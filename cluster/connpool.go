@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 )
 
+//grpc客户端连接池
 type connPool struct {
 	index uint32
 	v     []*grpc.ClientConn

@@ -45,15 +45,15 @@ import (
 // Options contains some configurations for current node
 type Options struct {
 	Pipeline       pipeline.Pipeline
-	IsMaster       bool
+	IsMaster       bool //如果当前node是master到底有什么用?
 	AdvertiseAddr  string
 	RetryInterval  time.Duration
 	ClientAddr     string
-	Components     *component.Components
+	Components     *component.Components //需加载的组件
 	Label          string
-	IsWebsocket    bool
-	TSLCertificate string
-	TSLKey         string
+	IsWebsocket    bool   //是否为websocket不应该封装在acceptor组件里吗？
+	TSLCertificate string //这个也是
+	TSLKey         string //同上
 }
 
 // Node represents a node in nano cluster, which will contains a group of services.
@@ -63,13 +63,13 @@ type Node struct {
 	Options            // current node options
 	ServiceAddr string // current server service address (RPC)
 
-	cluster   *cluster
-	handler   *LocalHandler
-	server    *grpc.Server
-	rpcClient *rpcClient
+	cluster   *cluster      //群集信息
+	handler   *LocalHandler //本地handler
+	server    *grpc.Server  //rpc服务端，不应该包含在 cluster里面吗
+	rpcClient *rpcClient    //rpc客户端,不应该包含在cluster里吗
 
 	mu       sync.RWMutex
-	sessions map[int64]*session.Session
+	sessions map[int64]*session.Session //session管理
 }
 
 func (n *Node) Startup() error {
@@ -396,6 +396,7 @@ func (n *Node) SessionClosed(_ context.Context, req *clusterpb.SessionClosedRequ
 	delete(n.sessions, req.SessionId)
 	n.mu.Unlock()
 	if found {
+		//延迟关
 		scheduler.PushTask(func() { session.Lifetime.Close(s) })
 	}
 	return &clusterpb.SessionClosedResponse{}, nil
@@ -408,6 +409,7 @@ func (n *Node) CloseSession(_ context.Context, req *clusterpb.CloseSessionReques
 	delete(n.sessions, req.SessionId)
 	n.mu.Unlock()
 	if found {
+		//直接关
 		s.Close()
 	}
 	return &clusterpb.CloseSessionResponse{}, nil

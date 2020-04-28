@@ -1,31 +1,38 @@
 syntax = "proto3";
 package clusterpb;
 
+//成员信息
 message MemberInfo {
     string label = 1;
     string serviceAddr = 2;
     repeated string services = 3;
 }
 
+//请求注册成员
 message RegisterRequest {
     MemberInfo memberInfo = 1;
 }
 
+//响应注册成员
 message RegisterResponse {
     repeated MemberInfo members = 1;
 }
 
+//请求注销地址
 message UnregisterRequest {
     string serviceAddr = 1;
 }
 
+//响应注销地址
 message UnregisterResponse {}
 
+//master服务
 service Master {
     rpc Register (RegisterRequest) returns (RegisterResponse) {}
     rpc Unregister (UnregisterRequest) returns (UnregisterResponse) {}
 }
 
+//request
 message RequestMessage {
     string gateAddr = 1;
     int64 sessionId = 2;
@@ -34,6 +41,7 @@ message RequestMessage {
     bytes data = 5;
 }
 
+//notify
 message NotifyMessage {
     string gateAddr = 1;
     int64 sessionId = 2;
@@ -41,12 +49,14 @@ message NotifyMessage {
     bytes data = 4;
 }
 
+//response
 message ResponseMessage {
     int64 sessionId = 1;
     uint64 id = 2;
     bytes data = 3;
 }
 
+//push
 message PushMessage {
     int64 sessionId = 1;
     string route = 2;
@@ -79,14 +89,18 @@ message CloseSessionRequest {
 
 message CloseSessionResponse {}
 
+//member服务
 service Member {
     rpc HandleRequest (RequestMessage) returns (MemberHandleResponse) {}
     rpc HandleNotify (NotifyMessage) returns (MemberHandleResponse) {}
     rpc HandlePush (PushMessage) returns (MemberHandleResponse) {}
     rpc HandleResponse (ResponseMessage) returns (MemberHandleResponse) {}
 
+    //添加新成员
     rpc NewMember (NewMemberRequest) returns (NewMemberResponse) {}
+    //删除成员
     rpc DelMember (DelMemberRequest) returns (DelMemberResponse) {}
     rpc SessionClosed(SessionClosedRequest) returns(SessionClosedResponse) {}
+
     rpc CloseSession(CloseSessionRequest) returns(CloseSessionResponse) {}
 }

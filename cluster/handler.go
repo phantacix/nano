@@ -73,15 +73,17 @@ func cache() {
 	}
 }
 
+//本地handler包装
 type LocalHandler struct {
+	//这个services里包含了 handlers，为什么还要再弄一个localhanders
 	localServices map[string]*component.Service // all registered service
 	localHandlers map[string]*component.Handler // all handler method
 
 	mu             sync.RWMutex
-	remoteServices map[string][]*clusterpb.MemberInfo
+	remoteServices map[string][]*clusterpb.MemberInfo  //远程服务地址信息
 
 	pipeline    pipeline.Pipeline
-	currentNode *Node
+	currentNode *Node  //绑定的当前结点
 }
 
 func NewHandler(currentNode *Node, pipeline pipeline.Pipeline) *LocalHandler {
@@ -195,7 +197,6 @@ func (h *LocalHandler) handle(conn net.Conn) {
 		}
 
 		members := h.currentNode.cluster.remoteAddrs()
-		log.Println("===>", len(members))
 		for _, remote := range members {
 			log.Println("Notify remote server success", remote)
 			pool, err := h.currentNode.rpcClient.getConnPool(remote)

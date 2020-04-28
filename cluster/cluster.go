@@ -32,6 +32,7 @@ import (
 // cluster represents a nano cluster, which contains a bunch of nano nodes
 // and each of them provide a group of different services. All services requests
 // from client will send to gate firstly and be forwarded to appropriate node.
+// 结点的集群对象，
 type cluster struct {
 	// If cluster is not large enough, use slice is OK
 	currentNode *Node
@@ -61,6 +62,7 @@ func (c *cluster) Register(_ context.Context, req *clusterpb.RegisterRequest) (*
 	// Notify registered node to update remote services
 	newMember := &clusterpb.NewMemberRequest{MemberInfo: req.MemberInfo}
 	for _, m := range c.members {
+		//append
 		resp.Members = append(resp.Members, m.memberInfo)
 		if m.isMaster {
 			continue
@@ -107,6 +109,9 @@ func (c *cluster) Unregister(_ context.Context, req *clusterpb.UnregisterRequest
 	// Notify registered node to update remote services
 	delMember := &clusterpb.DelMemberRequest{ServiceAddr: req.ServiceAddr}
 	for _, m := range c.members {
+		if m.MemberInfo().ServiceAddr == c.currentNode.ServiceAddr {
+			continue
+		}
 		pool, err := c.rpcClient.getConnPool(m.memberInfo.ServiceAddr)
 		if err != nil {
 			return nil, err

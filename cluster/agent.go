@@ -52,6 +52,7 @@ var (
 
 type (
 	// Agent corresponding a user, used for store raw conn information
+	// 用户连接对象,代连一个用户连接
 	agent struct {
 		// regular agent member
 		session  *session.Session    // session
@@ -59,15 +60,16 @@ type (
 		lastMid  uint64              // last message id
 		state    int32               // current agent state
 		chDie    chan struct{}       // wait for close
-		chSend   chan pendingMessage // push message queue
+		chSend   chan pendingMessage // push message queue,即将发送给客户端的消息
 		lastAt   int64               // last heartbeat unix time stamp
-		decoder  *codec.Decoder      // binary decoder
-		pipeline pipeline.Pipeline
+		decoder  *codec.Decoder      // binary decoder  packet解码接口
+		pipeline pipeline.Pipeline   // 处理管道
 
 		rpcHandler rpcHandler
 		srv        reflect.Value // cached session reflect.Value
 	}
 
+	//TODO 为什么还要再搞一个结构，直接用Message不好吗
 	pendingMessage struct {
 		typ     message.Type // message type
 		route   string       // message route(push)
@@ -236,6 +238,7 @@ func (a *agent) setStatus(state int32) {
 	atomic.StoreInt32(&a.state, state)
 }
 
+//每个用户连接后，会启一个goroutine来调用write，用于给用户推送消息
 func (a *agent) write() {
 	ticker := time.NewTicker(env.Heartbeat)
 	chWrite := make(chan []byte, agentWriteBacklog)
@@ -262,12 +265,14 @@ func (a *agent) write() {
 
 		case data := <-chWrite:
 			// close agent while low-level conn broken
+			// write给客户端
 			if _, err := a.conn.Write(data); err != nil {
 				log.Println(err.Error())
 				return
 			}
 
 		case data := <-a.chSend:
+			//获取将要发送的消息对象
 			payload, err := message.Serialize(data.payload)
 			if err != nil {
 				switch data.typ {
@@ -282,6 +287,7 @@ func (a *agent) write() {
 			}
 
 			// construct message and encode
+			//对嘛!可以直接用Message对象
 			m := &message.Message{
 				Type:  data.typ,
 				Data:  payload,
@@ -289,6 +295,7 @@ func (a *agent) write() {
 				ID:    data.mid,
 			}
 			if pipe := a.pipeline; pipe != nil {
+				//发送前进行管理处理
 				err := pipe.Outbound().Process(a.session, m)
 				if err != nil {
 					log.Println("broken pipeline", err.Error())
@@ -296,6 +303,7 @@ func (a *agent) write() {
 				}
 			}
 
+			//转换为[]byte
 			em, err := m.Encode()
 			if err != nil {
 				log.Println(err.Error())
@@ -303,11 +311,13 @@ func (a *agent) write() {
 			}
 
 			// packet encode
+			//packet 进行包编码
 			p, err := codec.Encode(packet.Data, em)
 			if err != nil {
 				log.Println(err)
 				break
 			}
+			//写入write队列
 			chWrite <- p
 
 		case <-a.chDie: // agent closed signal

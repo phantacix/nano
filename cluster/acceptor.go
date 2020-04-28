@@ -10,12 +10,13 @@ import (
 	"github.com/lonng/nano/session"
 )
 
+//网络接收器,NetworkEntity的实现，也约等于Session
 type acceptor struct {
-	sid        int64
-	gateClient clusterpb.MemberClient
-	session    *session.Session
-	lastMid    uint64
-	rpcHandler rpcHandler
+	sid        int64  //session id
+	gateClient clusterpb.MemberClient //网关客户端接口
+	session    *session.Session  //当前session
+	lastMid    uint64  //最后一次修改unix时间
+	rpcHandler rpcHandler //rpc调用函数
 	gateAddr   string
 }
 
