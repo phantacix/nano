@@ -295,7 +295,7 @@ func (a *agent) write() {
 				ID:    data.mid,
 			}
 			if pipe := a.pipeline; pipe != nil {
-				//发送前进行管理处理
+				//发送前进行管道处理
 				err := pipe.Outbound().Process(a.session, m)
 				if err != nil {
 					log.Println("broken pipeline", err.Error())

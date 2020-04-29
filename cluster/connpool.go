@@ -37,7 +37,7 @@ type connPool struct {
 	v     []*grpc.ClientConn
 }
 
-type rpcClient struct {
+type rpcConnPool struct {
 	sync.RWMutex
 	isClosed bool
 	pools    map[string]*connPool
@@ -75,6 +75,7 @@ func (a *connPool) init(addr string) error {
 }
 
 func (a *connPool) Get() *grpc.ClientConn {
+	//根据index递增进行取模， 轮循连接池
 	next := atomic.AddUint32(&a.index, 1) % uint32(len(a.v))
 	return a.v[next]
 }
@@ -91,13 +92,13 @@ func (a *connPool) Close() {
 	}
 }
 
-func newRPCClient() *rpcClient {
-	return &rpcClient{
+func newRPCClient() *rpcConnPool {
+	return &rpcConnPool{
 		pools: make(map[string]*connPool),
 	}
 }
 
-func (c *rpcClient) getConnPool(addr string) (*connPool, error) {
+func (c *rpcConnPool) getConnPool(addr string) (*connPool, error) {
 	c.RLock()
 	if c.isClosed {
 		c.RUnlock()
@@ -115,7 +116,7 @@ func (c *rpcClient) getConnPool(addr string) (*connPool, error) {
 	return array, nil
 }
 
-func (c *rpcClient) createConnPool(addr string) (*connPool, error) {
+func (c *rpcConnPool) createConnPool(addr string) (*connPool, error) {
 	c.Lock()
 	defer c.Unlock()
 	array, ok := c.pools[addr]
@@ -131,7 +132,7 @@ func (c *rpcClient) createConnPool(addr string) (*connPool, error) {
 	return array, nil
 }
 
-func (c *rpcClient) closePool() {
+func (c *rpcConnPool) closePool() {
 	c.Lock()
 	if !c.isClosed {
 		c.isClosed = true

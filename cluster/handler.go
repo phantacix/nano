@@ -80,10 +80,10 @@ type LocalHandler struct {
 	localHandlers map[string]*component.Handler // all handler method
 
 	mu             sync.RWMutex
-	remoteServices map[string][]*clusterpb.MemberInfo  //远程服务地址信息
+	remoteServices map[string][]*clusterpb.MemberInfo //远程服务地址信息
 
 	pipeline    pipeline.Pipeline
-	currentNode *Node  //绑定的当前结点
+	currentNode *Node //绑定的当前结点
 }
 
 func NewHandler(currentNode *Node, pipeline pipeline.Pipeline) *LocalHandler {
@@ -181,7 +181,7 @@ func (h *LocalHandler) RemoteService() []string {
 func (h *LocalHandler) handle(conn net.Conn) {
 	// create a client agent and startup write gorontine
 	agent := newAgent(conn, h.pipeline, h.remoteProcess)
-	h.currentNode.storeSession(agent.session)
+	h.currentNode.sessionService.storeSession(agent.session)
 
 	// startup write goroutine
 	go agent.write()
@@ -199,7 +199,7 @@ func (h *LocalHandler) handle(conn net.Conn) {
 		members := h.currentNode.cluster.remoteAddrs()
 		for _, remote := range members {
 			log.Println("Notify remote server success", remote)
-			pool, err := h.currentNode.rpcClient.getConnPool(remote)
+			pool, err := h.currentNode.rpcConnPool.getConnPool(remote)
 			if err != nil {
 				log.Println("Cannot retrieve connection pool for address", remote, err)
 				continue
@@ -319,7 +319,7 @@ func (h *LocalHandler) remoteProcess(session *session.Session, msg *message.Mess
 		remoteAddr = members[rand.Intn(len(members))].ServiceAddr
 		session.Router().Bind(service, remoteAddr)
 	}
-	pool, err := h.currentNode.rpcClient.getConnPool(remoteAddr)
+	pool, err := h.currentNode.rpcConnPool.getConnPool(remoteAddr)
 	if err != nil {
 		log.Println(err)
 		return

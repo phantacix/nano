@@ -148,9 +148,9 @@ func main() {
 	pip.Inbound().PushBack(stats.inbound)
 
 	log.SetFlags(log.LstdFlags | log.Llongfile)
-	http.Handle("/web/", http.StripPrefix("/web/", http.FileServer(http.Dir("web"))))
+	http.Handle("/web/", http.StripPrefix("/web/", http.FileServer(http.Dir("/Users/ryansu/git/go_project/nano/examples/demo/chat/web"))))
 
-	nano.Listen(":3250",
+	nano.Listen("127.0.0.1:3250",
 		nano.WithIsWebsocket(true),
 		nano.WithPipeline(pip),
 		nano.WithCheckOriginFunc(func(_ *http.Request) bool { return true }),

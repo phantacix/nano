@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/lonng/nano/cluster/clusterpb"
 	"github.com/lonng/nano/internal/log"
@@ -32,28 +33,83 @@ import (
 // cluster represents a nano cluster, which contains a bunch of nano nodes
 // and each of them provide a group of different services. All services requests
 // from client will send to gate firstly and be forwarded to appropriate node.
-// 结点的集群对象，
+// TODO MasterServer
 type cluster struct {
+	sync.RWMutex
 	// If cluster is not large enough, use slice is OK
 	currentNode *Node
-	rpcClient   *rpcClient
-
-	mu      sync.RWMutex
-	members []*Member
+	members     []*Member
 }
 
 func newCluster(currentNode *Node) *cluster {
-	return &cluster{currentNode: currentNode}
+	return &cluster{
+		currentNode: currentNode,
+	}
+}
+
+func (r *cluster) Init() error {
+
+	if r.currentNode.IsMaster {
+		clusterpb.RegisterMasterServer(r.currentNode.memberService.server, r)
+		member := &Member{
+			isMaster: true,
+			memberInfo: &clusterpb.MemberInfo{
+				Label:       r.currentNode.Label,
+				ServiceAddr: r.currentNode.ServiceAddr,
+				Services:    r.currentNode.handler.LocalService(),
+			},
+		}
+		r.members = append(r.members, member)
+	} else {
+		pool, err := r.currentNode.rpcConnPool.getConnPool(r.currentNode.AdvertiseAddr)
+		if err != nil {
+			return err
+		}
+
+		client := clusterpb.NewMasterClient(pool.Get())
+		request := &clusterpb.RegisterRequest{
+			MemberInfo: &clusterpb.MemberInfo{
+				Label:       r.currentNode.Label,
+				ServiceAddr: r.currentNode.ServiceAddr,
+				Services:    r.currentNode.handler.LocalService(),
+			},
+		}
+		for {
+			resp, err := client.Register(context.Background(), request)
+			if err == nil {
+				r.currentNode.handler.initRemoteService(resp.Members)
+				r.currentNode.cluster.initMembers(resp.Members)
+				break
+			}
+			log.Println("Register current node to cluster failed", err, "and will retry in", r.currentNode.RetryInterval.String())
+			time.Sleep(r.currentNode.RetryInterval)
+		}
+
+	}
+	return nil
 }
 
 // Register implements the MasterServer gRPC service
-func (c *cluster) Register(_ context.Context, req *clusterpb.RegisterRequest) (*clusterpb.RegisterResponse, error) {
+func (r *cluster) Register(_ context.Context, req *clusterpb.RegisterRequest) (*clusterpb.RegisterResponse, error) {
 	if req.MemberInfo == nil {
 		return nil, ErrInvalidRegisterReq
 	}
 
+	//目前的逻辑是，必需有一个node为master，当有新结点发送register时，该master结点会通知其他结点更新服务
+	//master结点承担了消息广播的作用。不过也有单点问题。
+
+	//几种方式：
+	//1、配表方式：
+	//每个结点启动时本地有一张配表获取其他结点的地址，当结点启动时，会主动连接配表里的结点，并进行服务登记，如果是新结点并更新本地配表
+
+	//2、依赖etcd
+	//所有结点在配表里已配置好etcd地址，当启动时会主动发送自己的信息到etcd,所有结点订阅该事件，并进行更新
+
+	//3、nats分布式消息队列
+	//所有结点进行通信时，消息都会发送到nats消息队列，各结点也会订阅相关的事件进行消息收发处理
+
 	resp := &clusterpb.RegisterResponse{}
-	for _, m := range c.members {
+	for _, m := range r.members {
 		if m.memberInfo.ServiceAddr == req.MemberInfo.ServiceAddr {
 			return nil, fmt.Errorf("address %s has registered", req.MemberInfo.ServiceAddr)
 		}
@@ -61,16 +117,18 @@ func (c *cluster) Register(_ context.Context, req *clusterpb.RegisterRequest) (*
 
 	// Notify registered node to update remote services
 	newMember := &clusterpb.NewMemberRequest{MemberInfo: req.MemberInfo}
-	for _, m := range c.members {
+	for _, m := range r.members {
 		//append
 		resp.Members = append(resp.Members, m.memberInfo)
 		if m.isMaster {
 			continue
 		}
-		pool, err := c.rpcClient.getConnPool(m.memberInfo.ServiceAddr)
+		pool, err := r.currentNode.rpcConnPool.getConnPool(m.memberInfo.ServiceAddr)
 		if err != nil {
 			return nil, err
 		}
+		//收到注册信息，通信所有成员。。。
+		//这里应该可以不用每次new client，每次从对象池拿就可以了
 		client := clusterpb.NewMemberClient(pool.Get())
 		_, err = client.NewMember(context.Background(), newMember)
 		if err != nil {
@@ -81,22 +139,23 @@ func (c *cluster) Register(_ context.Context, req *clusterpb.RegisterRequest) (*
 	log.Println("New peer register to cluster", req.MemberInfo.ServiceAddr)
 
 	// Register services to current node
-	c.currentNode.handler.addRemoteService(req.MemberInfo)
-	c.mu.Lock()
-	c.members = append(c.members, &Member{isMaster: false, memberInfo: req.MemberInfo})
-	c.mu.Unlock()
+	//远程服务信息添加至本机remote service
+	r.currentNode.handler.addRemoteService(req.MemberInfo)
+	r.Lock()
+	r.members = append(r.members, &Member{isMaster: false, memberInfo: req.MemberInfo})
+	r.Unlock()
 	return resp, nil
 }
 
 // Register implements the MasterServer gRPC service
-func (c *cluster) Unregister(_ context.Context, req *clusterpb.UnregisterRequest) (*clusterpb.UnregisterResponse, error) {
+func (r *cluster) Unregister(_ context.Context, req *clusterpb.UnregisterRequest) (*clusterpb.UnregisterResponse, error) {
 	if req.ServiceAddr == "" {
 		return nil, ErrInvalidRegisterReq
 	}
 
 	var index = -1
 	resp := &clusterpb.UnregisterResponse{}
-	for i, m := range c.members {
+	for i, m := range r.members {
 		if m.memberInfo.ServiceAddr == req.ServiceAddr {
 			index = i
 			break
@@ -108,11 +167,12 @@ func (c *cluster) Unregister(_ context.Context, req *clusterpb.UnregisterRequest
 
 	// Notify registered node to update remote services
 	delMember := &clusterpb.DelMemberRequest{ServiceAddr: req.ServiceAddr}
-	for _, m := range c.members {
-		if m.MemberInfo().ServiceAddr == c.currentNode.ServiceAddr {
+	for _, m := range r.members {
+		//过滤自己
+		if m.MemberInfo().ServiceAddr == r.currentNode.ServiceAddr {
 			continue
 		}
-		pool, err := c.rpcClient.getConnPool(m.memberInfo.ServiceAddr)
+		pool, err := r.currentNode.rpcConnPool.getConnPool(m.memberInfo.ServiceAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -126,45 +186,44 @@ func (c *cluster) Unregister(_ context.Context, req *clusterpb.UnregisterRequest
 	log.Println("Exists peer unregister to cluster", req.ServiceAddr)
 
 	// Register services to current node
-	c.currentNode.handler.delMember(req.ServiceAddr)
-	c.mu.Lock()
-	if index == len(c.members)-1 {
-		c.members = c.members[:index]
+	r.currentNode.handler.delMember(req.ServiceAddr)
+	r.Lock()
+	defer r.Unlock()
+
+	if index == len(r.members)-1 {
+		r.members = r.members[:index]
 	} else {
-		c.members = append(c.members[:index], c.members[index+1:]...)
+		r.members = append(r.members[:index], r.members[index+1:]...)
 	}
-	c.mu.Unlock()
 	return resp, nil
 }
 
-func (c *cluster) setRpcClient(client *rpcClient) {
-	c.rpcClient = client
-}
+func (r *cluster) remoteAddrs() []string {
+	r.RLock()
+	defer r.RUnlock()
 
-func (c *cluster) remoteAddrs() []string {
 	var addrs []string
-	c.mu.RLock()
-	for _, m := range c.members {
+	for _, m := range r.members {
 		addrs = append(addrs, m.memberInfo.ServiceAddr)
 	}
-	c.mu.RUnlock()
 	return addrs
 }
 
-func (c *cluster) initMembers(members []*clusterpb.MemberInfo) {
-	c.mu.Lock()
+func (r *cluster) initMembers(members []*clusterpb.MemberInfo) {
+	r.Lock()
+	defer r.Unlock()
 	for _, info := range members {
-		c.members = append(c.members, &Member{
+		r.members = append(r.members, &Member{
 			memberInfo: info,
 		})
 	}
-	c.mu.Unlock()
 }
 
-func (c *cluster) addMember(info *clusterpb.MemberInfo) {
-	c.mu.Lock()
+func (r *cluster) addMember(info *clusterpb.MemberInfo) {
+	r.Lock()
+	defer r.Unlock()
 	var found bool
-	for _, member := range c.members {
+	for _, member := range r.members {
 		if member.memberInfo.ServiceAddr == info.ServiceAddr {
 			member.memberInfo = info
 			found = true
@@ -172,28 +231,28 @@ func (c *cluster) addMember(info *clusterpb.MemberInfo) {
 		}
 	}
 	if !found {
-		c.members = append(c.members, &Member{
+		r.members = append(r.members, &Member{
 			memberInfo: info,
 		})
 	}
-	c.mu.Unlock()
 }
 
-func (c *cluster) delMember(addr string) {
-	c.mu.Lock()
+func (r *cluster) delMember(addr string) {
+	r.Lock()
+	defer r.Unlock()
+
 	var index = -1
-	for i, member := range c.members {
+	for i, member := range r.members {
 		if member.memberInfo.ServiceAddr == addr {
 			index = i
 			break
 		}
 	}
 	if index != -1 {
-		if index == len(c.members)-1 {
-			c.members = c.members[:index]
+		if index == len(r.members)-1 {
+			r.members = r.members[:index]
 		} else {
-			c.members = append(c.members[:index], c.members[index+1:]...)
+			r.members = append(r.members[:index], r.members[index+1:]...)
 		}
 	}
-	c.mu.Unlock()
 }

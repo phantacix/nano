@@ -21,9 +21,8 @@
 package cluster
 
 const (
-	_ int32 = iota
-	statusStart
-	statusHandshake
-	statusWorking
-	statusClosed
+	statusStart     = 1
+	statusHandshake = 2
+	statusWorking   = 3
+	statusClosed    = 4
 )

@@ -27,7 +27,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,23 +34,19 @@ import (
 	"github.com/lonng/nano/component"
 	"github.com/lonng/nano/internal/env"
 	"github.com/lonng/nano/internal/log"
-	"github.com/lonng/nano/internal/message"
 	"github.com/lonng/nano/pipeline"
-	"github.com/lonng/nano/scheduler"
-	"github.com/lonng/nano/session"
-	"google.golang.org/grpc"
 )
 
 // Options contains some configurations for current node
 type Options struct {
 	Pipeline       pipeline.Pipeline
-	IsMaster       bool //如果当前node是master到底有什么用?
+	IsMaster       bool //如果当前node是master到底有什么用?如果master挂了呢
 	AdvertiseAddr  string
 	RetryInterval  time.Duration
 	ClientAddr     string
 	Components     *component.Components //需加载的组件
 	Label          string
-	IsWebsocket    bool   //是否为websocket不应该封装在acceptor组件里吗？
+	IsWebsocket    bool   //是否为websocket不应该封装在connector组件里吗？
 	TSLCertificate string //这个也是
 	TSLKey         string //同上
 }
@@ -63,22 +58,25 @@ type Node struct {
 	Options            // current node options
 	ServiceAddr string // current server service address (RPC)
 
-	cluster   *cluster      //群集信息
-	handler   *LocalHandler //本地handler
-	server    *grpc.Server  //rpc服务端，不应该包含在 cluster里面吗
-	rpcClient *rpcClient    //rpc客户端,不应该包含在cluster里吗
+	cluster *cluster      //集群信息
+	handler *LocalHandler //本地handler
 
-	mu       sync.RWMutex
-	sessions map[int64]*session.Session //session管理
+	rpcConnPool *rpcConnPool
+
+	sessionService *SessionService
+	memberService  *MemberServerService
+
+	//网络连接管理
 }
 
 func (n *Node) Startup() error {
 	if n.ServiceAddr == "" {
 		return errors.New("service address cannot be empty in master node")
 	}
-	n.sessions = map[int64]*session.Session{}
-	n.cluster = newCluster(n)
+
+	n.sessionService = NewSessionService()
 	n.handler = NewHandler(n, n.Pipeline)
+
 	components := n.Components.List()
 	for _, c := range components {
 		err := n.handler.register(c.Comp, c.Opts)
@@ -122,65 +120,23 @@ func (n *Node) Handler() *LocalHandler {
 }
 
 func (n *Node) initNode() error {
+
+	n.rpcConnPool = newRPCClient()
+	n.cluster = newCluster(n)
+	n.memberService = NewMemberService(n)
+
 	// Current node is not master server and does not contains master
 	// address, so running in singleton mode
 	if !n.IsMaster && n.AdvertiseAddr == "" {
 		return nil
 	}
 
-	listener, err := net.Listen("tcp", n.ServiceAddr)
-	if err != nil {
-		return err
-	}
-
 	// Initialize the gRPC server and register service
-	n.server = grpc.NewServer()
-	n.rpcClient = newRPCClient()
-	clusterpb.RegisterMemberServer(n.server, n)
+	n.memberService.Serve(n.ServiceAddr)
 
-	go func() {
-		err := n.server.Serve(listener)
-		if err != nil {
-			log.Fatalf("Start current node failed: %v", err)
-		}
-	}()
-
-	if n.IsMaster {
-		clusterpb.RegisterMasterServer(n.server, n.cluster)
-		member := &Member{
-			isMaster: true,
-			memberInfo: &clusterpb.MemberInfo{
-				Label:       n.Label,
-				ServiceAddr: n.ServiceAddr,
-				Services:    n.handler.LocalService(),
-			},
-		}
-		n.cluster.members = append(n.cluster.members, member)
-		n.cluster.setRpcClient(n.rpcClient)
-	} else {
-		pool, err := n.rpcClient.getConnPool(n.AdvertiseAddr)
-		if err != nil {
-			return err
-		}
-		client := clusterpb.NewMasterClient(pool.Get())
-		request := &clusterpb.RegisterRequest{
-			MemberInfo: &clusterpb.MemberInfo{
-				Label:       n.Label,
-				ServiceAddr: n.ServiceAddr,
-				Services:    n.handler.LocalService(),
-			},
-		}
-		for {
-			resp, err := client.Register(context.Background(), request)
-			if err == nil {
-				n.handler.initRemoteService(resp.Members)
-				n.cluster.initMembers(resp.Members)
-				break
-			}
-			log.Println("Register current node to cluster failed", err, "and will retry in", n.RetryInterval.String())
-			time.Sleep(n.RetryInterval)
-		}
-
+	err := n.cluster.Init()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	return nil
@@ -202,12 +158,14 @@ func (n *Node) Shutdown() {
 	}
 
 	if !n.IsMaster && n.AdvertiseAddr != "" {
-		pool, err := n.rpcClient.getConnPool(n.AdvertiseAddr)
+		pool, err := n.rpcConnPool.getConnPool(n.AdvertiseAddr)
 		if err != nil {
 			log.Println("Retrieve master address error", err)
 			goto EXIT
 		}
 		client := clusterpb.NewMasterClient(pool.Get())
+
+		//注销当前结点
 		request := &clusterpb.UnregisterRequest{
 			ServiceAddr: n.ServiceAddr,
 		}
@@ -219,8 +177,8 @@ func (n *Node) Shutdown() {
 	}
 
 EXIT:
-	if n.server != nil {
-		n.server.GracefulStop()
+	if n.memberService.server != nil {
+		n.memberService.server.GracefulStop()
 	}
 }
 
@@ -244,14 +202,14 @@ func (n *Node) listenAndServe() {
 }
 
 func (n *Node) listenAndServeWS() {
-	var upgrader = websocket.Upgrader{
+	var u = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin:     env.CheckOrigin,
 	}
 
 	http.HandleFunc("/"+strings.TrimPrefix(env.WSPath, "/"), func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := u.Upgrade(w, r, nil)
 		if err != nil {
 			log.Println(fmt.Sprintf("Upgrade failure, URI=%s, Error=%s", r.RequestURI, err.Error()))
 			return
@@ -266,14 +224,14 @@ func (n *Node) listenAndServeWS() {
 }
 
 func (n *Node) listenAndServeWSTLS() {
-	var upgrader = websocket.Upgrader{
+	var u = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin:     env.CheckOrigin,
 	}
 
 	http.HandleFunc("/"+strings.TrimPrefix(env.WSPath, "/"), func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := u.Upgrade(w, r, nil)
 		if err != nil {
 			log.Println(fmt.Sprintf("Upgrade failure, URI=%s, Error=%s", r.RequestURI, err.Error()))
 			return
@@ -285,132 +243,4 @@ func (n *Node) listenAndServeWSTLS() {
 	if err := http.ListenAndServeTLS(n.ClientAddr, n.TSLCertificate, n.TSLKey, nil); err != nil {
 		log.Fatal(err.Error())
 	}
-}
-
-func (n *Node) storeSession(s *session.Session) {
-	n.mu.Lock()
-	n.sessions[s.ID()] = s
-	n.mu.Unlock()
-}
-
-func (n *Node) findSession(sid int64) *session.Session {
-	n.mu.RLock()
-	s := n.sessions[sid]
-	n.mu.RUnlock()
-	return s
-}
-
-func (n *Node) findOrCreateSession(sid int64, gateAddr string) (*session.Session, error) {
-	n.mu.RLock()
-	s, found := n.sessions[sid]
-	n.mu.RUnlock()
-	if !found {
-		conns, err := n.rpcClient.getConnPool(gateAddr)
-		if err != nil {
-			return nil, err
-		}
-		ac := &acceptor{
-			sid:        sid,
-			gateClient: clusterpb.NewMemberClient(conns.Get()),
-			rpcHandler: n.handler.remoteProcess,
-			gateAddr:   gateAddr,
-		}
-		s = session.New(ac)
-		ac.session = s
-		n.mu.Lock()
-		n.sessions[sid] = s
-		n.mu.Unlock()
-	}
-	return s, nil
-}
-
-func (n *Node) HandleRequest(_ context.Context, req *clusterpb.RequestMessage) (*clusterpb.MemberHandleResponse, error) {
-	handler, found := n.handler.localHandlers[req.Route]
-	if !found {
-		return nil, fmt.Errorf("service not found in current node: %v", req.Route)
-	}
-	s, err := n.findOrCreateSession(req.SessionId, req.GateAddr)
-	if err != nil {
-		return nil, err
-	}
-	msg := &message.Message{
-		Type:  message.Request,
-		ID:    req.Id,
-		Route: req.Route,
-		Data:  req.Data,
-	}
-	n.handler.localProcess(handler, req.Id, s, msg)
-	return &clusterpb.MemberHandleResponse{}, nil
-}
-
-func (n *Node) HandleNotify(_ context.Context, req *clusterpb.NotifyMessage) (*clusterpb.MemberHandleResponse, error) {
-	handler, found := n.handler.localHandlers[req.Route]
-	if !found {
-		return nil, fmt.Errorf("service not found in current node: %v", req.Route)
-	}
-	s, err := n.findOrCreateSession(req.SessionId, req.GateAddr)
-	if err != nil {
-		return nil, err
-	}
-	msg := &message.Message{
-		Type:  message.Notify,
-		Route: req.Route,
-		Data:  req.Data,
-	}
-	n.handler.localProcess(handler, 0, s, msg)
-	return &clusterpb.MemberHandleResponse{}, nil
-}
-
-func (n *Node) HandlePush(_ context.Context, req *clusterpb.PushMessage) (*clusterpb.MemberHandleResponse, error) {
-	s := n.findSession(req.SessionId)
-	if s == nil {
-		return &clusterpb.MemberHandleResponse{}, fmt.Errorf("session not found: %v", req.SessionId)
-	}
-	return &clusterpb.MemberHandleResponse{}, s.Push(req.Route, req.Data)
-}
-
-func (n *Node) HandleResponse(_ context.Context, req *clusterpb.ResponseMessage) (*clusterpb.MemberHandleResponse, error) {
-	s := n.findSession(req.SessionId)
-	if s == nil {
-		return &clusterpb.MemberHandleResponse{}, fmt.Errorf("session not found: %v", req.SessionId)
-	}
-	return &clusterpb.MemberHandleResponse{}, s.ResponseMID(req.Id, req.Data)
-}
-
-func (n *Node) NewMember(_ context.Context, req *clusterpb.NewMemberRequest) (*clusterpb.NewMemberResponse, error) {
-	n.handler.addRemoteService(req.MemberInfo)
-	n.cluster.addMember(req.MemberInfo)
-	return &clusterpb.NewMemberResponse{}, nil
-}
-
-func (n *Node) DelMember(_ context.Context, req *clusterpb.DelMemberRequest) (*clusterpb.DelMemberResponse, error) {
-	n.handler.delMember(req.ServiceAddr)
-	n.cluster.delMember(req.ServiceAddr)
-	return &clusterpb.DelMemberResponse{}, nil
-}
-
-// SessionClosed implements the MemberServer interface
-func (n *Node) SessionClosed(_ context.Context, req *clusterpb.SessionClosedRequest) (*clusterpb.SessionClosedResponse, error) {
-	n.mu.Lock()
-	s, found := n.sessions[req.SessionId]
-	delete(n.sessions, req.SessionId)
-	n.mu.Unlock()
-	if found {
-		//延迟关
-		scheduler.PushTask(func() { session.Lifetime.Close(s) })
-	}
-	return &clusterpb.SessionClosedResponse{}, nil
-}
-
-// CloseSession implements the MemberServer interface
-func (n *Node) CloseSession(_ context.Context, req *clusterpb.CloseSessionRequest) (*clusterpb.CloseSessionResponse, error) {
-	n.mu.Lock()
-	s, found := n.sessions[req.SessionId]
-	delete(n.sessions, req.SessionId)
-	n.mu.Unlock()
-	if found {
-		//直接关
-		s.Close()
-	}
-	return &clusterpb.CloseSessionResponse{}, nil
 }

@@ -12,11 +12,11 @@ import (
 
 //网络接收器,NetworkEntity的实现，也约等于Session
 type acceptor struct {
-	sid        int64  //session id
-	gateClient clusterpb.MemberClient //网关客户端接口
-	session    *session.Session  //当前session
-	lastMid    uint64  //最后一次修改unix时间
-	rpcHandler rpcHandler //rpc调用函数
+	sid        int64                  //session id
+	gateClient clusterpb.MemberClient //rpc客户端接口
+	session    *session.Session       //当前session
+	lastMid    uint64                 //最后一次修改unix时间
+	rpcHandler rpcHandler             //rpc调用函数
 	gateAddr   string
 }
 
@@ -48,6 +48,7 @@ func (a *acceptor) RPC(route string, v interface{}) error {
 		Route: route,
 		Data:  data,
 	}
+	//处理消息接口
 	a.rpcHandler(a.session, msg, true)
 	return nil
 }

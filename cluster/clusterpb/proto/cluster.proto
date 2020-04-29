@@ -3,9 +3,9 @@ package clusterpb;
 
 //成员信息
 message MemberInfo {
-    string label = 1;
-    string serviceAddr = 2;
-    repeated string services = 3;
+    string label = 1; //标签
+    string serviceAddr = 2; //服务器地址
+    repeated string services = 3; //服务名列表
 }
 
 //请求注册成员
@@ -20,7 +20,7 @@ message RegisterResponse {
 
 //请求注销地址
 message UnregisterRequest {
-    string serviceAddr = 1;
+    string serviceAddr = 1; //服务器地址
 }
 
 //响应注销地址
